@@ -1,3 +1,14 @@
+# Task 4 — CI/CD & Multi-Environment Deployment
+#
+# Triggered on push to:  master → dev namespace
+#                        pre-release/v* → preprod namespace
+#                        release/v*     → release namespace
+#
+# Secrets required in GitHub → Settings → Secrets and Variables → Actions:
+#   DOCKERHUB_USERNAME  — your Docker Hub username (souravdasdocker)
+#   DOCKERHUB_TOKEN     — Docker Hub access token (not your password)
+#   KUBECONFIG_B64      — base64-encoded kubeconfig of the target cluster
+#                         (scoped to a service account, not a personal admin kubeconfig)
 name: CI/CD
 
 on:
@@ -6,6 +17,7 @@ on:
       - master
       - "pre-release/v*"
       - "release/v*"
+  # Manual trigger for rollback only.
   workflow_dispatch:
     inputs:
       rollback_namespace:
@@ -13,11 +25,14 @@ on:
         required: false
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_BACKEND: ${{ github.repository }}-backend
-  IMAGE_FRONTEND: ${{ github.repository }}-frontend
+  REGISTRY: docker.io
+  BACKEND_IMAGE: souravdasdocker/node-react-postgres-platform-backend
+  FRONTEND_IMAGE: souravdasdocker/node-react-postgres-platform-frontend
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Install, validate, and test both services.
+  # ─────────────────────────────────────────────────────────────────────────
   build-and-test:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -27,6 +42,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
 
       - name: Install backend dependencies
         working-directory: backend
@@ -36,18 +55,24 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Backend build validation
+      # Syntax-check every source file without running the server.
+      - name: Backend syntax validation
         working-directory: backend
-        run: node --check src/index.js
+        run: node --check src/index.js src/db.js src/queue.js src/redisClient.js src/search.js src/worker.js
 
+      # Run tests if a test/ directory exists (exits 0 either way).
       - name: Backend tests
         working-directory: backend
         run: npm test --if-present
 
+      # Vite build validates the React app compiles cleanly.
       - name: Frontend build
         working-directory: frontend
         run: npm run build
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Build Docker images and push to Docker Hub.
+  # ─────────────────────────────────────────────────────────────────────────
   build-and-push:
     if: github.event_name == 'push'
     needs: build-and-test
@@ -58,8 +83,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Tag = <branch-name>-<short-sha> so every image is traceable back to
-      # the exact commit and branch that produced it.
+      # Compute:
+      #   tag       = <safe-branch-name>-<short-sha>   e.g. master-a1b2c3d
+      #   namespace = which k8s namespace to deploy to
       - name: Compute image tag and target namespace
         id: meta
         run: |
@@ -68,19 +94,23 @@ jobs:
           echo "tag=${SAFE_BRANCH}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
           case "${GITHUB_REF_NAME}" in
-            master) echo "namespace=dev" >> "$GITHUB_OUTPUT" ;;
-            pre-release/v*) echo "namespace=preprod" >> "$GITHUB_OUTPUT" ;;
-            release/v*) echo "namespace=release" >> "$GITHUB_OUTPUT" ;;
+            master)           echo "namespace=dev"     >> "$GITHUB_OUTPUT" ;;
+            pre-release/v*)   echo "namespace=preprod" >> "$GITHUB_OUTPUT" ;;
+            release/v*)       echo "namespace=release" >> "$GITHUB_OUTPUT" ;;
           esac
 
-      # GITHUB_TOKEN is short-lived and scoped to this repo/run only - no
-      # long-lived registry credentials are stored anywhere in the repo.
-      - name: Log in to GHCR
+      # DOCKERHUB_TOKEN is a Docker Hub access token stored as a GitHub Secret.
+      # It is never printed to logs and is scoped to push access only.
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Enable multi-platform builds (optional, future-proofing for ARM).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Build and push backend image
         uses: docker/build-push-action@v6
@@ -88,9 +118,12 @@ jobs:
           context: .
           file: Dockerfile.backend
           push: true
+          # Two tags: the precise commit tag and a rolling "env-latest" tag.
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.namespace }}-latest
+            ${{ env.BACKEND_IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.BACKEND_IMAGE }}:${{ steps.meta.outputs.namespace }}-latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build and push frontend image
         uses: docker/build-push-action@v6
@@ -99,9 +132,14 @@ jobs:
           file: Dockerfile.frontend
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.namespace }}-latest
+            ${{ env.FRONTEND_IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.FRONTEND_IMAGE }}:${{ steps.meta.outputs.namespace }}-latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Deploy manifests to the correct Kubernetes namespace.
+  # ─────────────────────────────────────────────────────────────────────────
   deploy:
     if: github.event_name == 'push'
     needs: build-and-push
@@ -110,15 +148,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # KUBECONFIG_B64 is a base64-encoded kubeconfig stored as an encrypted
-      # GitHub Actions secret, scoped to a service account with access to
-      # only this cluster/namespace set - never printed or written to logs.
+      # KUBECONFIG_B64 is the kubeconfig base64-encoded and stored as a Secret.
+      # We write it to disk and never echo it to the log.
       - name: Configure kubeconfig
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
 
-      - name: Deploy manifests to ${{ needs.build-and-push.outputs.namespace }}
+      - name: Deploy to ${{ needs.build-and-push.outputs.namespace }}
         env:
           NAMESPACE: ${{ needs.build-and-push.outputs.namespace }}
           TAG: ${{ needs.build-and-push.outputs.tag }}
@@ -127,19 +165,31 @@ jobs:
           mkdir -p /tmp/manifests
           cp k8s/*.yaml /tmp/manifests/
 
-          # Point the deployments at the image just built and pushed.
-          sed -i "s#ghcr.io/.*-backend:.*#${REGISTRY}/${IMAGE_BACKEND}:${TAG}#" /tmp/manifests/backend-deployment.yaml
-          sed -i "s#ghcr.io/.*-backend:.*#${REGISTRY}/${IMAGE_BACKEND}:${TAG}#" /tmp/manifests/bullmq-worker-deployment.yaml
-          sed -i "s#ghcr.io/.*-frontend:.*#${REGISTRY}/${IMAGE_FRONTEND}:${TAG}#" /tmp/manifests/frontend-deployment.yaml
+          # Swap image tags in deployment manifests to the freshly built image.
+          sed -i "s|souravdasdocker/node-react-postgres-platform-backend:.*|${BACKEND_IMAGE}:${TAG}|g" \
+            /tmp/manifests/backend-deployment.yaml \
+            /tmp/manifests/bullmq-worker-deployment.yaml
 
-          # Re-target every manifest at the environment-specific namespace.
-          sed -i "s/namespace: dev/namespace: ${NAMESPACE}/" /tmp/manifests/*.yaml
+          sed -i "s|souravdasdocker/node-react-postgres-platform-frontend:.*|${FRONTEND_IMAGE}:${TAG}|g" \
+            /tmp/manifests/frontend-deployment.yaml
 
+          # Re-target every manifest at the correct namespace.
+          sed -i "s/namespace: dev/namespace: ${NAMESPACE}/g" /tmp/manifests/*.yaml
+
+          # Create namespace if it doesn't exist (idempotent).
           kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
           kubectl apply -n "${NAMESPACE}" -f /tmp/manifests/
-          kubectl rollout status -n "${NAMESPACE}" deployment/backend --timeout=120s
+
+          # Wait for rollout to succeed (or fail fast).
+          kubectl rollout status -n "${NAMESPACE}" deployment/backend  --timeout=120s
           kubectl rollout status -n "${NAMESPACE}" deployment/frontend --timeout=120s
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Rollback job — triggered manually via workflow_dispatch.
+  # Fast path: kubectl rollout undo (reverts to the previous ReplicaSet).
+  # Precise path: re-run this workflow from the previous commit SHA.
+  # ─────────────────────────────────────────────────────────────────────────
   rollback:
     if: github.event_name == 'workflow_dispatch' && inputs.rollback_namespace != ''
     runs-on: ubuntu-latest
@@ -148,13 +198,12 @@ jobs:
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
 
-      # Fast path: undo the last rollout. The slower/more precise path is
-      # re-running this workflow with a previous commit checked out, which
-      # rebuilds and redeploys that exact previous image tag.
-      - name: Roll back last deployment
+      - name: Roll back ${{ inputs.rollback_namespace }}
         env:
           NAMESPACE: ${{ inputs.rollback_namespace }}
         run: |
           kubectl rollout undo -n "${NAMESPACE}" deployment/backend
           kubectl rollout undo -n "${NAMESPACE}" deployment/frontend
+          echo "Rolled back backend and frontend in namespace: ${NAMESPACE}"
