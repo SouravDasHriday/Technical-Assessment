@@ -1,0 +1,107 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml
+#
+# One-command local setup:  docker compose up --build
+#
+# All secret values come from a .env file (copy .env.example → .env first).
+# Nothing is hardcoded here; Compose loads .env automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      # Named volume keeps data across container restarts and rebuilds.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Elasticsearch (search engine, single-node dev mode) ─────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false   # disabled for local dev only
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ── Backend API ─────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      # ── Postgres (simulated read/write split: both URLs point to same instance) ─
+      DB_WRITE_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      DB_READ_URL:  postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      # ── Redis ──────────────────────────────────────────────────────────────────
+      REDIS_URL: redis://redis:6379
+      # ── Search ─────────────────────────────────────────────────────────────────
+      SEARCH_URL: http://elasticsearch:9200
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+
+  # ── BullMQ Worker (async job consumer) ──────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    command: ["node", "src/worker.js"]
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Frontend (React SPA served by nginx) ─────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        # In Compose mode the browser calls the backend directly on port 4000.
+        VITE_API_BASE_URL: http://localhost:4000/api
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  # Postgres data persists across container restarts.
+  postgres_data:

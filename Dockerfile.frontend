@@ -1,0 +1,31 @@
+# ── Stage 1: build the React app ────────────────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Cache dependency installation separately from source compilation.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+
+# VITE_API_BASE_URL is injected at build time.
+# In Kubernetes the Ingress proxy makes /api same-origin, so we default
+# to "/api". Override via --build-arg when a different base URL is needed.
+ARG VITE_API_BASE_URL=/api
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+
+RUN npm run build
+
+# ── Stage 2: serve the static bundle with nginx ──────────────────────────────
+FROM nginx:1.27-alpine AS runtime
+
+# Remove the default config and replace with ours.
+RUN rm /etc/nginx/conf.d/default.conf
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy the compiled React bundle.
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

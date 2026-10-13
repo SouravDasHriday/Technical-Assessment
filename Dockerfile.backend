@@ -1,0 +1,26 @@
+# ── Stage 1: install production dependencies ───────────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+# Copy only manifest files first so Docker can cache the npm install layer
+# independently of source changes.
+COPY backend/package.json backend/package-lock.json ./
+RUN npm ci --omit=dev
+
+# ── Stage 2: final runtime image ────────────────────────────────────────────
+FROM node:20-alpine AS runtime
+WORKDIR /app
+
+# Run as a non-root user (best practice).
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+# Bring in only the installed modules and application source.
+COPY --from=deps /app/node_modules ./node_modules
+COPY backend/src ./src
+COPY backend/package.json ./
+
+USER appuser
+
+EXPOSE 4000
+
+CMD ["node", "src/index.js"]
