@@ -1,0 +1,46 @@
+# Task 6 — Loki (log aggregation backend)
+# Receives logs pushed by Fluent Bit and is queried by Grafana.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: dev
+  labels:
+    app: loki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      containers:
+        - name: loki
+          image: grafana/loki:2.9.8
+          args:
+            - "-config.file=/etc/loki/local-config.yaml"
+          ports:
+            - containerPort: 3100
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki-service
+  namespace: dev
+spec:
+  selector:
+    app: loki
+  ports:
+    - port: 3100
+      targetPort: 3100
+  type: ClusterIP
