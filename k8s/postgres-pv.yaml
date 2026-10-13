@@ -1,0 +1,15 @@
+# PersistentVolume — a host-path volume that kind/minikube can provision locally.
+# In a real cluster this would be replaced by a StorageClass (EBS, Persistent Disk, etc.)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: postgres-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: standard
+  hostPath:
+    path: /data/postgres   # directory on the cluster node

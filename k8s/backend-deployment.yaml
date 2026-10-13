@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: dev
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      # Prometheus scrapes this pod via this annotation pair.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4000"
+        prometheus.io/path: "/api/health"
+    spec:
+      containers:
+        - name: backend
+          # Image is updated by the CI/CD pipeline on every push.
+          image: souravdasdocker/node-react-postgres-platform-backend:dev-latest
+          ports:
+            - containerPort: 4000
+          env:
+            - name: PORT
+              value: "4000"
+            # Secrets injected from Kubernetes Secret object.
+            - name: DB_WRITE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_WRITE_URL
+            - name: DB_READ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_READ_URL
+            # Non-sensitive config from ConfigMap.
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: REDIS_URL
+            - name: SEARCH_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: SEARCH_URL
+
+          # Liveness probe: is the process alive?
+          # Failing this restarts the container.
+          livenessProbe:
+            httpGet:
+              path: /api/health/live
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+
+          # Readiness probe: are dependencies (DB) reachable?
+          # Failing this removes the pod from Service load balancing WITHOUT restarting it.
+          readinessProbe:
+            httpGet:
+              path: /api/health/ready
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

@@ -1,0 +1,14 @@
+# ClusterIP = internal only. Only pods inside the cluster can reach Postgres.
+# This is intentional — the database must never be exposed externally.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: dev
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
