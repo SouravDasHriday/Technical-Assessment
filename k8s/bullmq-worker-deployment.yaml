@@ -1,0 +1,38 @@
+# Task 5 — BullMQ Worker
+# Runs the same backend image but with the worker entry-point (npm run worker).
+# Consumes "item-events" jobs from the Redis queue enqueued by the API on writes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bullmq-worker
+  namespace: dev
+  labels:
+    app: bullmq-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bullmq-worker
+  template:
+    metadata:
+      labels:
+        app: bullmq-worker
+    spec:
+      containers:
+        - name: worker
+          image: souravdasdocker/node-react-postgres-platform-backend:dev-latest
+          # Override the default CMD to run the worker script instead of the API.
+          command: ["node", "src/worker.js"]
+          env:
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: REDIS_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
