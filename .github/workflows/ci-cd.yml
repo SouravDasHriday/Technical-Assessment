@@ -35,7 +35,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────
   build-and-test:
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -76,7 +76,7 @@ jobs:
   build-and-push:
     if: github.event_name == 'push'
     needs: build-and-test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       namespace: ${{ steps.meta.outputs.namespace }}
@@ -143,7 +143,7 @@ jobs:
   deploy:
     if: github.event_name == 'push'
     needs: build-and-push
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: ${{ needs.build-and-push.outputs.namespace }}
     steps:
       - uses: actions/checkout@v4
@@ -192,7 +192,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────
   rollback:
     if: github.event_name == 'workflow_dispatch' && inputs.rollback_namespace != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Configure kubeconfig
         run: |
