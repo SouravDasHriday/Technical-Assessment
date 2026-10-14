@@ -1,14 +1,5 @@
 # Task 4 — CI/CD & Multi-Environment Deployment
-#
-# Triggered on push to:  master → dev namespace
-#                        pre-release/v* → preprod namespace
-#                        release/v*     → release namespace
-#
-# Secrets required in GitHub → Settings → Secrets and Variables → Actions:
-#   DOCKERHUB_USERNAME  — your Docker Hub username (souravdasdocker)
-#   DOCKERHUB_TOKEN     — Docker Hub access token (not your password)
-#   KUBECONFIG_B64      — base64-encoded kubeconfig of the target cluster
-#                         (scoped to a service account, not a personal admin kubeconfig)
+
 name: CI/CD
 
 on:
@@ -73,69 +64,34 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────
   # Job 2: Build Docker images and push to Docker Hub.
   # ─────────────────────────────────────────────────────────────────────────
-  build-and-push:
-    if: github.event_name == 'push'
+build-and-push:
     needs: build-and-test
     runs-on: self-hosted
-    outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-      namespace: ${{ steps.meta.outputs.namespace }}
     steps:
       - uses: actions/checkout@v4
-
-      # Compute:
-      #   tag       = <safe-branch-name>-<short-sha>   e.g. master-a1b2c3d
-      #   namespace = which k8s namespace to deploy to
-      - name: Compute image tag and target namespace
-        id: meta
-        run: |
-          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          SAFE_BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
-          echo "tag=${SAFE_BRANCH}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
-          case "${GITHUB_REF_NAME}" in
-            master)           echo "namespace=dev"     >> "$GITHUB_OUTPUT" ;;
-            pre-release/v*)   echo "namespace=preprod" >> "$GITHUB_OUTPUT" ;;
-            release/v*)       echo "namespace=release" >> "$GITHUB_OUTPUT" ;;
-          esac
-
-      # DOCKERHUB_TOKEN is a Docker Hub access token stored as a GitHub Secret.
-      # It is never printed to logs and is scoped to push access only.
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # Enable multi-platform builds (optional, future-proofing for ARM).
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push backend image
-        uses: docker/build-push-action@v6
+      - name: Extract branch and SHA for tags
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          echo "tag=${{ github.ref_name }}-${SHORT_SHA}" >> $GITHUB_ENV
+      - name: Build and push Backend
+        uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile.backend
+          file: ./Dockerfile.backend
           push: true
-          # Two tags: the precise commit tag and a rolling "env-latest" tag.
-          tags: |
-            ${{ env.BACKEND_IMAGE }}:${{ steps.meta.outputs.tag }}
-            ${{ env.BACKEND_IMAGE }}:${{ steps.meta.outputs.namespace }}-latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v6
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend:${{ env.tag }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend:latest
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile.frontend
+          file: ./Dockerfile.frontend
           push: true
-          tags: |
-            ${{ env.FRONTEND_IMAGE }}:${{ steps.meta.outputs.tag }}
-            ${{ env.FRONTEND_IMAGE }}:${{ steps.meta.outputs.namespace }}-latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ env.tag }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
 
   # ─────────────────────────────────────────────────────────────────────────
   # Job 3: Deploy manifests to the correct Kubernetes namespace.
@@ -148,8 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # KUBECONFIG_B64 is the kubeconfig base64-encoded and stored as a Secret.
-      # We write it to disk and never echo it to the log.
+
       - name: Configure kubeconfig
         run: |
           mkdir -p "$HOME/.kube"
